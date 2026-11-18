@@ -10,11 +10,17 @@ from SmartApi.smartWebSocketV2 import SmartWebSocketV2
 
 # ---- STOCKS: 3 screens x 4 charts. ';' separates screens, ',' separates stocks.
 # Change without code: set the PAGES environment variable on Render. NSE symbols (no -EQ).
-DEFAULT_PAGES = ("DIVISLAB,RELIANCE,HDFCBANK,TCS;"
-                 "INFY,ICICIBANK,SBIN,ITC;"
-                 "NIFTY,BANKNIFTY,LT,BAJFINANCE")
-PAGES = [[s.strip().upper() for s in p.split(",") if s.strip()]
-         for p in os.environ.get("PAGES", DEFAULT_PAGES).split(";") if p.strip()]
+# Format: SYMBOL:Display Name   (":Display Name" is optional)
+DEFAULT_PAGES = ("MENONBE:Menon Bearings,CUPID:Cupid,MCX:MCX,GROWW:Groww;"
+                 "ANLON:Anlon Healthcare,PRIZOR:Prizor Viztech,KSHINTL:KSH International,GURJATH:Gurjath Inject;"
+                 "SBC:SBC Exports,SAILIFE:Sai Life Sciences,SHUKRAPHAR:Shukra Medtech,SOUTHBANK:South Indian Bank;"
+                 "DIVISLAB:Divi's Labs,RELIANCE:Reliance,HDFCBANK:HDFC Bank,TCS:TCS;"
+                 "NIFTY:Nifty 50,BANKNIFTY:Bank Nifty,INFY:Infosys,SBIN:SBI")
+RAW = [[x.strip() for x in p.split(",") if x.strip()]
+       for p in os.environ.get("PAGES", DEFAULT_PAGES).split(";") if p.strip()]
+PAGES = [[x.split(":")[0].strip().upper() for x in p] for p in RAW]
+LABELS = {x.split(":")[0].strip().upper(): (x.split(":", 1)[1].strip() if ":" in x else x.strip().upper())
+          for p in RAW for x in p}
 INTERVAL = os.environ.get("INTERVAL", "FIVE_MINUTE")
 BUCKETS = {"ONE_MINUTE": 60, "THREE_MINUTE": 180, "FIVE_MINUTE": 300, "TEN_MINUTE": 600,
            "FIFTEEN_MINUTE": 900, "THIRTY_MINUTE": 1800, "ONE_HOUR": 3600}
@@ -26,6 +32,7 @@ IST = 19800            # seconds; chart times are shifted so the axis shows IST
 OPEN = 9 * 3600 + 15 * 60   # NSE candles start at 09:15
 
 clients, tokens, by_token, cache = set(), {}, {}, {}
+all_eq = []
 ready, loop, last_tick, cur_ws = threading.Event(), None, [0.0], [None]
 status = {"state": "starting", "message": "Starting market-data service"}
 session_day, morning_refresh_day = [None], [None]
@@ -88,14 +95,24 @@ def login():
 
 def load_tokens():
     url = "https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json"
-    want = {s + "-EQ" for s in SYMS if s not in INDEX_TOKENS}
+    series = ["EQ", "BE", "BZ", "SM", "ST"]
+    best = {}
     for s, t in INDEX_TOKENS.items():
         if s in SYMS:
             tokens[s] = t; by_token[t] = s
     for r in requests.get(url, timeout=180).json():
-        if r["exch_seg"] == "NSE" and r["symbol"] in want:
-            s = r["symbol"][:-3]
-            tokens[s] = r["token"]; by_token[r["token"]] = s
+        if r["exch_seg"] != "NSE" or "-" not in r["symbol"]:
+            continue
+        base, suf = r["symbol"].rsplit("-", 1)
+        if suf not in series:
+            continue
+        all_eq.append(r["symbol"])
+        if base in SYMS and base not in INDEX_TOKENS:
+            rank = series.index(suf)
+            if base not in best or rank < best[base][0]:
+                best[base] = (rank, r["token"])
+    for s, (_, t) in best.items():
+        tokens[s] = t; by_token[t] = s
     for s in SYMS:
         if s not in tokens:
             print("UNKNOWN SYMBOL (check spelling):", s)
@@ -259,7 +276,15 @@ def candles(k: str = ""):
     check(k)
     if not ready.is_set():
         raise HTTPException(503, "loading")
-    return {"pages": PAGES, "candles": cache, "prev": {s: prev_close(cache.get(s, [])) for s in SYMS}}
+    return {"pages": PAGES, "labels": LABELS, "candles": cache, "prev": {s: prev_close(cache.get(s, [])) for s in SYMS}}
+
+
+@app.get("/api/find")
+def find(q: str = "", k: str = ""):
+    """Search Angel symbols, e.g. /api/find?q=GUJ&k=YOURKEY"""
+    check(k)
+    q = q.strip().upper()
+    return {"matches": [x for x in all_eq if q and q in x][:60]}
 
 
 @app.websocket("/ws")

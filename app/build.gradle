@@ -1,0 +1,15 @@
+plugins { id 'com.android.application' }
+android {
+    namespace 'com.satya.stockcharts'
+    compileSdk 34
+    defaultConfig {
+        applicationId "com.satya.stockcharts"
+        minSdk 23
+        targetSdk 30
+        versionCode 1
+        versionName "1.0"
+        // The server URL comes from the GitHub secret APP_URL at build time (never stored in the repo)
+        buildConfigField "String", "APP_URL", "\"${project.findProperty('APP_URL') ?: 'https://example.com'}\""
+    }
+    buildFeatures { buildConfig true }
+}

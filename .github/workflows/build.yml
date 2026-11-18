@@ -1,0 +1,29 @@
+name: build-apk
+on:
+  push:
+    branches: [main]
+    paths: ['app/**', 'build.gradle', 'settings.gradle', '.github/**']
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: 17 }
+      - uses: gradle/actions/setup-gradle@v4
+        with: { gradle-version: 8.9 }
+      - name: Build APK
+        env:
+          APP_URL: ${{ secrets.APP_URL }}
+        run: |
+          test -n "$APP_URL" || { echo "Add the APP_URL secret first (see README)"; exit 1; }
+          gradle assembleDebug --no-daemon -PAPP_URL="$APP_URL"
+          cp app/build/outputs/apk/debug/app-debug.apk stockcharts.apk
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          make_latest: true
+          files: stockcharts.apk

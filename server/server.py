@@ -34,6 +34,7 @@ OPEN = 9 * 3600 + 15 * 60   # NSE candles start at 09:15
 clients, tokens, by_token, cache = set(), {}, {}, {}
 all_eq = []
 exch = {}   # symbol -> "NSE" or "BSE"
+pc = {}     # symbol -> official previous close from the exchange feed
 ready, loop, last_tick, cur_ws = threading.Event(), None, [0.0], [None]
 status = {"state": "starting", "message": "Starting market-data service"}
 session_day, morning_refresh_day = [None], [None]
@@ -163,17 +164,19 @@ def stream(jwt, feed):
         for key in by_token:
             et, tk = key.split(":")
             groups.setdefault(int(et), []).append(tk)
-        sws.subscribe("c1", 1, [{"exchangeType": e, "tokens": t} for e, t in groups.items()])
+        sws.subscribe("c1", 2, [{"exchangeType": e, "tokens": t} for e, t in groups.items()])
 
     def on_data(ws, msg):
         tok = str(msg.get("token")).strip('"')
         s = by_token.get(str(msg.get("exchange_type")) + ":" + tok)
         if s and "last_traded_price" in msg:
             p = msg["last_traded_price"] / 100
+            if msg.get("closed_price"):
+                pc[s] = msg["closed_price"] / 100
             now = time.time(); last_tick[0] = now
-            c = on_tick(s, p, now)
-            if c and loop:
-                out = json.dumps({"s": s, "p": p, "c": c})
+            on_tick(s, p, now)
+            if loop:
+                out = json.dumps({"s": s, "p": p, "pc": pc.get(s), "ts": msg.get("exchange_timestamp")})
                 asyncio.run_coroutine_threadsafe(broadcast(out), loop)
 
     sws.on_open = on_open
@@ -291,7 +294,7 @@ def candles(k: str = ""):
     check(k)
     if not ready.is_set():
         raise HTTPException(503, "loading")
-    return {"pages": PAGES, "labels": LABELS, "candles": cache, "prev": {s: prev_close(cache.get(s, [])) for s in SYMS}}
+    return {"pages": PAGES, "labels": LABELS, "candles": cache, "prev": {s: (pc.get(s) or prev_close(cache.get(s, []))) for s in SYMS}}
 
 
 @app.get("/api/find")

@@ -33,6 +33,7 @@ OPEN = 9 * 3600 + 15 * 60   # NSE candles start at 09:15
 
 clients, tokens, by_token, cache = set(), {}, {}, {}
 all_eq = []
+exch = {}   # symbol -> "NSE" or "BSE"
 ready, loop, last_tick, cur_ws = threading.Event(), None, [0.0], [None]
 status = {"state": "starting", "message": "Starting market-data service"}
 session_day, morning_refresh_day = [None], [None]
@@ -94,27 +95,36 @@ def login():
 
 
 def load_tokens():
+    """NSE first (EQ, BE, BZ, SM, ST). Any symbol not found on NSE is looked up on BSE."""
     url = "https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json"
     series = ["EQ", "BE", "BZ", "SM", "ST"]
-    best = {}
+    best, bse = {}, {}
     for s, t in INDEX_TOKENS.items():
         if s in SYMS:
-            tokens[s] = t; by_token[t] = s
+            tokens[s] = t; by_token["1:" + t] = s; exch[s] = "NSE"
     for r in requests.get(url, timeout=180).json():
-        if r["exch_seg"] != "NSE" or "-" not in r["symbol"]:
-            continue
-        base, suf = r["symbol"].rsplit("-", 1)
-        if suf not in series:
-            continue
-        all_eq.append(r["symbol"])
-        if base in SYMS and base not in INDEX_TOKENS:
-            rank = series.index(suf)
-            if base not in best or rank < best[base][0]:
-                best[base] = (rank, r["token"])
+        seg, sym = r["exch_seg"], r["symbol"]
+        if seg == "NSE" and "-" in sym:
+            base, suf = sym.rsplit("-", 1)
+            if suf not in series:
+                continue
+            all_eq.append(sym)
+            if base in SYMS and base not in INDEX_TOKENS:
+                rank = series.index(suf)
+                if base not in best or rank < best[base][0]:
+                    best[base] = (rank, r["token"])
+        elif seg == "BSE" and r.get("instrumenttype", "") == "":
+            base = sym.split("-")[0]
+            all_eq.append("BSE:" + sym)
+            if base in SYMS and base not in bse:
+                bse[base] = r["token"]
     for s, (_, t) in best.items():
-        tokens[s] = t; by_token[t] = s
+        tokens[s] = t; by_token["1:" + t] = s; exch[s] = "NSE"
     for s in SYMS:
-        if s not in tokens:
+        if s not in tokens and s in bse:
+            tokens[s] = bse[s]; by_token["3:" + bse[s]] = s; exch[s] = "BSE"
+            print("Using BSE for", s)
+        elif s not in tokens:
             print("UNKNOWN SYMBOL (check spelling):", s)
 
 
@@ -124,7 +134,7 @@ def load_candles(api):
         if s not in tokens:
             cache[s] = []; continue
         try:
-            r = api.getCandleData({"exchange": "NSE", "symboltoken": tokens[s], "interval": INTERVAL,
+            r = api.getCandleData({"exchange": exch.get(s, "NSE"), "symboltoken": tokens[s], "interval": INTERVAL,
                                    "fromdate": (now - timedelta(days=7)).strftime("%Y-%m-%d %H:%M"),
                                    "todate": now.strftime("%Y-%m-%d %H:%M")})
             rows = r.get("data") or []
@@ -149,10 +159,15 @@ def stream(jwt, feed):
     cur_ws[0] = sws
 
     def on_open(ws):
-        sws.subscribe("c1", 1, [{"exchangeType": 1, "tokens": list(by_token)}])
+        groups = {}
+        for key in by_token:
+            et, tk = key.split(":")
+            groups.setdefault(int(et), []).append(tk)
+        sws.subscribe("c1", 1, [{"exchangeType": e, "tokens": t} for e, t in groups.items()])
 
     def on_data(ws, msg):
-        s = by_token.get(str(msg.get("token")).strip('"'))
+        tok = str(msg.get("token")).strip('"')
+        s = by_token.get(str(msg.get("exchange_type")) + ":" + tok)
         if s and "last_traded_price" in msg:
             p = msg["last_traded_price"] / 100
             now = time.time(); last_tick[0] = now
